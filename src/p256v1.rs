@@ -12,6 +12,7 @@ use std::os::raw::c_ulong;
 
 use crate::VRF;
 use openssl::ocsp::OcspRevokedStatus;
+use core::borrow::Borrow;
 
 /// The size (in bytes) of a secret key
 pub const SECRET_KEY_SIZE: usize = 32;
@@ -170,9 +171,6 @@ fn nonce_generation_RFC6979(
     // K = HMAC_K(V || 0x00 || int2octects(secret_key) || bits2octects(data))
     let mut message1 = vec![];
 
-    // Internal Octet - 0x00
-    let internal_bytes: Vec<u8> = vec![0x00; 1];
-
     // Bytes to octets from secret key - int2octects(x)
     // Left padding is required for inserting leading zeros
     let mut secret_key_bytes: Vec<u8> = secret_key.to_vec();
@@ -186,16 +184,22 @@ fn nonce_generation_RFC6979(
     // Bits to octets from data - bits2octets(h1)
     // Length of this value should be dependent on qlen (i.e. SECP256k1 is 32)
     let data_trunc = bits2octets(data, ctx)?;
+    let left_padding2 = match ctx.curve {
+        Curve::SECP256K1 => 32 - data_trunc.len(),
+        Curve::SECT163K1 => 21 - data_trunc.len(),
+    };
+    let mut padded_data_trunc: Vec<u8> = vec![0; left_padding2];
+    padded_data_trunc.extend(&data_trunc);
 
 //    println!("------> V length:  {:?} - {:x?}", &V.len(), &V);
 //    println!("------> internal bytes length:  {:?}  - {:x?}", &internal_bytes.len(), &internal_bytes);
 //    println!("------> padded secret key length:  {:?} - {:x?}", &padded_secret_key_bytes.len(), &padded_secret_key_bytes);
-//    println!("------> data_trunc length:  {:?} - {:x?}", &data_trunc.len(), &data_trunc);
+    println!("------> data_trunc length:  {:?} - {:x?}", &data_trunc.len(), &data_trunc);
 
     message1.extend(&V);
-    message1.extend(&internal_bytes);
+    message1.push(0x00);
     message1.extend(&padded_secret_key_bytes);
-    message1.extend(&data_trunc);
+    message1.extend(&padded_data_trunc);
 
 //    println!("------> message1 length {:?} - {:x?}", &message1.len(), &message1);
 
@@ -203,23 +207,47 @@ fn nonce_generation_RFC6979(
     let k1 = HMAC::mac(&message1, &K);
     let v1 = HMAC::mac(&V, &k1);
     println!("------> K1 length {:?} - {:x?}", &k1.len(), &k1);
-//    println!("------> V1 length {:?} - {:x?}", &v1.len(), &v1);
+    println!("------> V1 length {:?} - {:x?}", &v1.len(), &v1);
 
     let mut message2 = vec![];
     message2.extend(&v1);
     message2.push(0x01);
     message2.extend(&padded_secret_key_bytes);
-    message2.extend(&data_trunc);
+    message2.extend(&padded_data_trunc);
 //    println!("------> message2 length {:?} - {:x?}", &message2.len(), &message2);
 
-    let k2 = HMAC::mac(&message2, &k1);
-    let v2 = HMAC::mac(&v1, &k2);
-    println!("------> K2 length {:?} - {:x?}", &k2.len(), &k2);
-//    println!("------> V2 length {:?} - {:x?}", &v2.len(), &v2);
+    let mut K = HMAC::mac(&message2, &k1);
+    let mut V = HMAC::mac(&v1, &K);
+    println!("------> K2 length {:?} - {:x?}", &K.len(), &K);
+    println!("------> V2 length {:?} - {:x?}", &V.len(), &V);
 
-    // if result is bigger than q, repeat
-    let v3 = HMAC::mac(&v2, &k2);
-    Ok(v3)
+//
+//    // if result is bigger than q, repeat
+//    let v3 = HMAC::mac(&v2, &k2);
+//
+//    println!("------> V3 length {:?} - {:x?}", &v3.len(), &v3);
+//
+//    let v4 = HMAC::mac(&v3, &k2);
+//    println!("------> V4 length {:?} - {:x?}", &v4.len(), &v4);
+    let order = BigNum::new().map(|mut ord| {
+        ctx.group.order(&mut ord, &mut ctx.bn_ctx);
+        ord
+    })?;
+
+    loop {
+        V = HMAC::mac(&V, &K);
+        let ret_bn = BigNum::from_slice(&V)?;
+        if &ret_bn > &BigNum::from_u32(0)? && &ret_bn < &order {
+            return Ok(V);
+        }
+        let mut message = vec![];
+        message.extend(&V);
+        message.push(0x00);
+        K = HMAC::mac(&message, &K);
+        V = HMAC::mac(&V, &K);
+    }
+
+    //Err(Error::Unknown)
 
     // END
 
@@ -259,30 +287,38 @@ fn nonce_generation_RFC6979(
 }
 
 fn bits2octets(data: &[u8], ctx: &mut ECContext) -> Result<Vec<u8>, Error> {
-    let mut data_bn = match ctx.curve {
+    let mut z1 = match ctx.curve {
         Curve::SECP256K1 => bits2int(data, 256)?,
         Curve::SECT163K1 => bits2int(data, 163)?,
     };
-    //    let mut data_bn = bits2int(data, 256)?;
     let order = BigNum::new().map(|mut ord| {
         ctx.group.order(&mut ord, &mut ctx.bn_ctx);
         ord
     })?;
+//    let z2 = &z1 - &order;
+//
+//    let bn_zero = BigNum::from_u32(0)?;
+//    let result = if &z2 < &bn_zero {
+//        z2.to_vec()
+//    } else {
+//        z1.to_vec()
+//    };
 
+//    //    let mut data_bn = bits2int(data, 256)?;
+//
     let result = BigNum::new().map(|mut res| {
-        res.nnmod(&data_bn, &order, &mut ctx.bn_ctx);
+        res.nnmod(&z1, &order, &mut ctx.bn_ctx);
         res.to_vec()
     })?;
 
     Ok(result)
 }
 
-/// Transforms slice into Bignum of modulus qlen by converting to bignum and right-shifting len(data)-qlen bits.
+/// Transforms slice into Bignum and right-shifts it by len(data)-qlen bits.
 fn bits2int(data: &[u8], qlen: usize) -> Result<BigNum, Error> {
     let data_len_bits = data.len() * 8;
     let result = BigNum::from_slice(data).and_then(|data_bn| {
         if data_len_bits > qlen {
-            // (>>)
             let mut truncated = BigNum::new()?;
             truncated.rshift(&data_bn, (data_len_bits - qlen) as i32)?;
 
@@ -291,6 +327,8 @@ fn bits2int(data: &[u8], qlen: usize) -> Result<BigNum, Error> {
             Ok(data_bn)
         }
     })?;
+    let _data2 = data.to_vec();
+    let _data_vec = result.to_vec();
 
     Ok(result)
 }
@@ -441,6 +479,7 @@ mod test {
         let sk_bn = BigNum::from_slice(&sk).unwrap();
 
         // Hashed input message (labelled as h1)
+        //FIXME: TO CHECK if 0x02 is correct
         let data = hex::decode("02e2e1ab1b9f5a8a68fa4aad597e7493095648d3473b213bba120fe42d1a595f3e")
             .unwrap();
         let data_bn = BigNum::from_slice(&data).unwrap();
@@ -450,7 +489,7 @@ mod test {
         assert_eq!(derived_nonce, expected_nonce.as_slice());
     }
 
-//    #[test]
+    //    #[test]
 //    fn test_nonce_generation_RFC6979_SECP256K1() {
 //        let mut ctx = create_ec_context().unwrap();
 //        // Private Key
@@ -471,4 +510,20 @@ mod test {
 //        println!("{:x?}", derived_k);
 //        assert_eq!(derived_k, expected_k.as_slice());
 //    }
+
+    #[test]
+    fn test_bits2int() {
+        let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
+        let data1 = vec![0x01; 32];
+        let data1_bn = BigNum::from_slice(&data1).unwrap();
+        let result1 = bits2int(&data1, 256).unwrap();
+        assert_eq!(data1_bn, result1);
+
+        let data2 = vec![0x01; 33];
+        let data2_bn = BigNum::from_slice(&data2).unwrap();
+        let result2 = bits2int(&data2, 256).unwrap();
+        let mut truncated = BigNum::new().unwrap();
+        truncated.rshift(&data2_bn, 8);
+        assert_eq!(truncated.to_vec(), result2.to_vec());
+    }
 }
