@@ -25,6 +25,11 @@ pub type SecretKey<'a> = &'a [u8; SECRET_KEY_SIZE];
 /// The type of the public key
 pub type PublicKey<'a> = &'a [u8; PUBLIC_KEY_SIZE];
 
+enum Curve {
+    SECP256K1,
+    SECT163K1,
+}
+
 /// Error that can be raised when proving/verifying VRFs
 #[derive(Debug, Fail)]
 pub enum Error {
@@ -47,6 +52,7 @@ impl From<ErrorStack> for Error {
 
 /// Elliptic Curve context
 struct ECContext {
+    curve: Curve,
     group: EcGroup,
     bn_ctx: BigNumContext,
     hasher: MessageDigest,
@@ -69,13 +75,16 @@ impl<'a> VRF<PublicKey<'a>, SecretKey<'a>> for P256v1 {
 }
 
 /// Function to create a Elliptic Curve context using the curve prime256v1
-fn create_ec_context() -> Result<ECContext, Error> {
-    //    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
-    let group = EcGroup::from_curve_name(Nid::SECT163K1)?;
+fn create_ec_context(curve: Curve) -> Result<ECContext, Error> {
+    let group = match curve {
+        Curve::SECP256K1 => EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?,
+        Curve::SECT163K1 => EcGroup::from_curve_name(Nid::SECT163K1)?,
+    };
     let bn_ctx = BigNumContext::new()?;
     let hasher = MessageDigest::sha256();
 
     Ok(ECContext {
+        curve,
         group,
         bn_ctx,
         hasher,
@@ -130,8 +139,16 @@ fn nonce_generation_RFC6979(
     data: &[u8],
     ctx: &mut ECContext,
 ) -> Result<[u8; 32], Error> {
-    let mut V: [u8; 32] = [0x01; 32];
-    let mut K: [u8; 32] = [0x00; 32];
+
+    // Step (a): omitted
+
+    // Steps (b, c): set V to ones and K to zeros
+    // where length = 8*ceil(hlen/8)
+    // If SHA256, length = 32
+    let V: [u8; 32] = [0x01; 32];
+    let K: [u8; 32] = [0x00; 32];
+
+
     let c = 0..1;
 
     /*   c.into_iter().map(|idx|{
@@ -146,41 +163,106 @@ fn nonce_generation_RFC6979(
         V.clone_from_slice(&v_prime);
         K.clone_from_slice(&k_prime);
     });*/
-    let mut message = vec![];
-    let data_trunc = bits2octets(data, ctx)?;
-    let mut exp_secret_key = secret_key.to_vec();
-    //FIXME!: this should create a vec of zeros of length (qlen - sizeof(secret_key.to_vec()))
-    let zero_vec = vec![0; 1];
 
-    message.extend(&V);
-    message.push(0);
-    //FIXME: ref
-    message.extend(&zero_vec);
-    message.extend(secret_key.to_vec());
-    message.extend(&data_trunc);
-    println!("message{:x?}", message);
+    // START
 
-    let k1 = HMAC::mac(&message, &K);
-    println!("k1{:x?}", k1);
-
-    let v1 = HMAC::mac(&V, &k1);
-    println!("v1{:x?}", v1);
+    // Step d: Set K
+    // K = HMAC_K(V || 0x00 || int2octects(secret_key) || bits2octects(data))
     let mut message1 = vec![];
-    message1.extend(&v1);
-    message1.push(1);
-    //FIXME: ref
-    message1.extend(&zero_vec);
-    message1.extend(secret_key.to_vec());
+
+    // Internal Octet - 0x00
+    let internal_bytes: Vec<u8> = vec![0x00; 1];
+
+    // Bytes to octets from secret key - int2octects(x)
+    // Left padding is required for inserting leading zeros
+    let mut secret_key_bytes: Vec<u8> = secret_key.to_vec();
+    let left_padding = match ctx.curve {
+        Curve::SECP256K1 => 32 - secret_key_bytes.len(),
+        Curve::SECT163K1 => 21 - secret_key_bytes.len(),
+    };
+    let mut padded_secret_key_bytes: Vec<u8> = vec![0; left_padding];
+    padded_secret_key_bytes.extend(&secret_key_bytes);
+
+    // Bits to octets from data - bits2octets(h1)
+    // Length of this value should be dependent on qlen (i.e. SECP256k1 is 32)
+    let data_trunc = bits2octets(data, ctx)?;
+
+//    println!("------> V length:  {:?} - {:x?}", &V.len(), &V);
+//    println!("------> internal bytes length:  {:?}  - {:x?}", &internal_bytes.len(), &internal_bytes);
+//    println!("------> padded secret key length:  {:?} - {:x?}", &padded_secret_key_bytes.len(), &padded_secret_key_bytes);
+//    println!("------> data_trunc length:  {:?} - {:x?}", &data_trunc.len(), &data_trunc);
+
+    message1.extend(&V);
+    message1.extend(&internal_bytes);
+    message1.extend(&padded_secret_key_bytes);
     message1.extend(&data_trunc);
-    let k2 = HMAC::mac(&message1, &k1);
-    println!("k2{:x?}", k2);
+
+//    println!("------> message1 length {:?} - {:x?}", &message1.len(), &message1);
+
+    // Compute new value of K after first iteration
+    let k1 = HMAC::mac(&message1, &K);
+    let v1 = HMAC::mac(&V, &k1);
+    println!("------> K1 length {:?} - {:x?}", &k1.len(), &k1);
+//    println!("------> V1 length {:?} - {:x?}", &v1.len(), &v1);
+
+    let mut message2 = vec![];
+    message2.extend(&v1);
+    message2.push(0x01);
+    message2.extend(&padded_secret_key_bytes);
+    message2.extend(&data_trunc);
+//    println!("------> message2 length {:?} - {:x?}", &message2.len(), &message2);
+
+    let k2 = HMAC::mac(&message2, &k1);
     let v2 = HMAC::mac(&v1, &k2);
-    println!("v2{:x?}", v2);
+    println!("------> K2 length {:?} - {:x?}", &k2.len(), &k2);
+//    println!("------> V2 length {:?} - {:x?}", &v2.len(), &v2);
+
     // if result is bigger than q, repeat
-    Ok(HMAC::mac(&v2, &k2))
+    let v3 = HMAC::mac(&v2, &k2);
+    Ok(v3)
+
+    // END
+
+//    let mut message = vec![];
+//    let data_trunc = bits2octets(data, ctx)?;
+//    let mut exp_secret_key = secret_key.to_vec();
+//
+//    //FIXME!: this should create a vec of zeros of length (qlen - sizeof(secret_key.to_vec()))
+//    let zero_vec = vec![0; 1];
+//
+//    message.extend(&V);
+//    message.push(0);
+//    //FIXME: ref
+//    message.extend(&zero_vec);
+//    message.extend(secret_key.to_vec());
+//    message.extend(&data_trunc);
+////    println!("message{:x?}", message);
+//
+//    let k1 = HMAC::mac(&message, &K);
+////    println!("k1{:x?}", k1);
+//
+//    let v1 = HMAC::mac(&V, &k1);
+////    println!("v1{:x?}", v1);
+//    let mut message1 = vec![];
+//    message1.extend(&v1);
+//    message1.push(1);
+//    //FIXME: ref
+//    message1.extend(&zero_vec);
+//    message1.extend(secret_key.to_vec());
+//    message1.extend(&data_trunc);
+//    let k2 = HMAC::mac(&message1, &k1);
+////    println!("k2{:x?}", k2);
+//    let v2 = HMAC::mac(&v1, &k2);
+////    println!("v2{:x?}", v2);
+//    // if result is bigger than q, repeat
+//    Ok(HMAC::mac(&v2, &k2))
 }
+
 fn bits2octets(data: &[u8], ctx: &mut ECContext) -> Result<Vec<u8>, Error> {
-    let mut data_bn = bits2int(data, 163)?;
+    let mut data_bn = match ctx.curve {
+        Curve::SECP256K1 => bits2int(data, 256)?,
+        Curve::SECT163K1 => bits2int(data, 163)?,
+    };
     //    let mut data_bn = bits2int(data, 256)?;
     let order = BigNum::new().map(|mut ord| {
         ctx.group.order(&mut ord, &mut ctx.bn_ctx);
@@ -194,6 +276,7 @@ fn bits2octets(data: &[u8], ctx: &mut ECContext) -> Result<Vec<u8>, Error> {
 
     Ok(result)
 }
+
 /// Transforms slice into Bignum of modulus qlen by converting to bignum and right-shifting len(data)-qlen bits.
 fn bits2int(data: &[u8], qlen: usize) -> Result<BigNum, Error> {
     let data_len_bits = data.len() * 8;
@@ -239,7 +322,7 @@ mod test {
         // Example of using a different hashing function
 
         let k = [0x01];
-        let mut ctx = create_ec_context().unwrap();
+        let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
 
         let secret_key = BigNum::from_slice(&k).unwrap();
         let expected = [
@@ -254,11 +337,13 @@ mod test {
             .unwrap());
     }
 
+    /// Hash to try and increment (TAI) test
+    /// Test vector extracted from VRF RFC draft (section A.1)
     #[test]
     fn test_hash_to_try_and_increment() {
         // Example of using a different hashing function
         let suite: u8 = 1;
-        let mut ctx = create_ec_context().unwrap();
+        let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
         let public_key_hex =
             hex::decode("0360fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6")
                 .unwrap();
@@ -268,6 +353,7 @@ mod test {
                 .unwrap();
         let expected_hash =
             EcPoint::from_bytes(&ctx.group, &expected_hash_hex, &mut ctx.bn_ctx).unwrap();
+        // Data to be hashed: ASCII "sample
         let data = hex::decode("73616d706c65").unwrap();
         let derived_hash = hash_to_try_and_increment(&suite, &public_key, &data, &mut ctx).unwrap();
         assert!(derived_hash
@@ -279,7 +365,7 @@ mod test {
     fn test_hash_to_try_and_increment_2() {
         // Example of using a different hashing function
         let suite: u8 = 1;
-        let mut ctx = create_ec_context().unwrap();
+        let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
         let public_key_hex =
             hex::decode("03596375e6ce57e0f20294fc46bdfcfd19a39f8161b58695b3ec5b3d16427c274d")
                 .unwrap();
@@ -295,53 +381,94 @@ mod test {
             .eq(&ctx.group, &expected_hash, &mut ctx.bn_ctx)
             .unwrap());
     }
-    #[test]
-    fn test_nonce_generation_RFC6979() {
-        // Curve 163 (just to test procedure...)
-        // Example of using a different hashing function
-        let mut ctx = create_ec_context().unwrap();
-        let k = hex::decode("009A4D6792295A7F730FC3F2B49CBC0F62E862272F").unwrap();
-        let mut ord = BigNum::new().unwrap();
-        ctx.group.order(&mut ord, &mut ctx.bn_ctx).unwrap();
-        let t = BigNum::from_slice(&[0x01]).unwrap();
-        let secret_key = BigNum::from_slice(&k).unwrap();
-        let mut c_k = BigNum::new().unwrap();
 
-        // In the RFC is called K (or T)
+    /// Nonce generation test using the curve K-163
+    /// Test vector extracted from RFC6979 (section A.1)
+    #[test]
+    fn test_nonce_generation_RFC6979_SECT163K1() {
+        let mut ctx = create_ec_context(Curve::SECT163K1).unwrap();
+
+        // Expected result/nonce (labelled as K or T)
+        // This is the va;ue of T
         let expected_nonce =
             hex::decode("9305a46de7ff8eb107194debd3fd48aa20d5e7656cbe0ea69d2a8d4e7c67314a")
                 .unwrap();
+
+        // Secret Key (labelled as x)
+        let sk = hex::decode("009A4D6792295A7F730FC3F2B49CBC0F62E862272F").unwrap();
+        let sk_bn = BigNum::from_slice(&sk).unwrap();
+
+        // Hashed input message (labelled as h1)
         let data = hex::decode("AF2BDBE1AA9B6EC1E2ADE1D694F41FC71A831D0268E9891562113D8A62ADD1BF")
             .unwrap();
         let data_bn = BigNum::from_slice(&data).unwrap();
-        c_k.mod_mul(&data_bn, &t, &ord, &mut ctx.bn_ctx).unwrap();
-        println!("{:?}", data);
-        println!("{:?}", c_k.to_vec());
 
-        let derived_nonce = nonce_generation_RFC6979(&secret_key, &data, &mut ctx).unwrap();
-        println!("{:x?}", derived_nonce);
-        assert!(derived_nonce == expected_nonce.as_slice());
+        // Nonce generation
+        let derived_nonce = nonce_generation_RFC6979(&sk_bn, &data, &mut ctx).unwrap();
+        assert_eq!(derived_nonce, expected_nonce.as_slice());
+
+        // let t = BigNum::from_slice(&[0x01]).unwrap();
+        //        let mut c_k = BigNum::new().unwrap();
+        //
+        //        // In the RFC is called K (or T)
+        //        let expected_nonce =
+        //            hex::decode("9305a46de7ff8eb107194debd3fd48aa20d5e7656cbe0ea69d2a8d4e7c67314a")
+        //                .unwrap();
+        //        let data = hex::decode("AF2BDBE1AA9B6EC1E2ADE1D694F41FC71A831D0268E9891562113D8A62ADD1BF")
+        //            .unwrap();
+        //        let data_bn = BigNum::from_slice(&data).unwrap();
+        //        c_k.mod_mul(&data_bn, &t, &ord, &mut ctx.bn_ctx).unwrap();
+        //        println!("{:?}", data);
+        //        println!("{:?}", c_k.to_vec());
+        //
+        //        let derived_nonce = nonce_generation_RFC6979(&sk_point, &data, &mut ctx).unwrap();
+        //        println!("{:x?}", derived_nonce);
+        //        assert!(derived_nonce == expected_nonce.as_slice());
     }
 
-    //    #[test]
-    //    fn test_nonce_generation_RFC6979() {
-    //        // Example of using a different hashing function
-    //        let mut ctx = create_ec_context().unwrap();
-    //        let k = hex::decode("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721")
-    //            .unwrap();
-    //        let mut ord = BigNum::new().unwrap();
-    //        ctx.group.order(&mut ord, &mut ctx.bn_ctx).unwrap();
-    //        let t = BigNum::from_slice(&[0x01]).unwrap();
-    //        let secret_key = BigNum::from_slice(&k).unwrap();
-    //
-    //        let expected_k =
-    //            hex::decode("c1aba586552242e6b324ab4b7b26f86239226f3cfa85b1c3b675cc061cf147dc")
-    //                .unwrap();
-    //        let data = hex::decode("02e2e1ab1b9f5a8a68fa4aad597e7493095648d3473b213bba120fe42d1a595f3e")
-    //            .unwrap();
-    //        let data_bn = BigNum::from_slice(&data).unwrap();
-    //        let derived_k = nonce_generation_RFC6979(&secret_key, &data, &mut ctx).unwrap();
-    //        println!("{:x?}", derived_k);
-    //        assert_eq!(derived_k, expected_k.as_slice());
-    //    }
+    #[test]
+    fn test_nonce_generation_RFC6979_SECP256K1() {
+        let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
+
+        // Expected result/nonce (labelled as K or T)
+        // This is the va;ue of T
+        let expected_nonce =
+            hex::decode("c1aba586552242e6b324ab4b7b26f86239226f3cfa85b1c3b675cc061cf147dc")
+                .unwrap();
+
+        // Secret Key (labelled as x)
+        let sk = hex::decode("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721").unwrap();
+        let sk_bn = BigNum::from_slice(&sk).unwrap();
+
+        // Hashed input message (labelled as h1)
+        let data = hex::decode("02e2e1ab1b9f5a8a68fa4aad597e7493095648d3473b213bba120fe42d1a595f3e")
+            .unwrap();
+        let data_bn = BigNum::from_slice(&data).unwrap();
+
+        // Nonce generation
+        let derived_nonce = nonce_generation_RFC6979(&sk_bn, &data, &mut ctx).unwrap();
+        assert_eq!(derived_nonce, expected_nonce.as_slice());
+    }
+
+//    #[test]
+//    fn test_nonce_generation_RFC6979_SECP256K1() {
+//        let mut ctx = create_ec_context().unwrap();
+//        // Private Key
+//        let k = hex::decode("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721")
+//            .unwrap();
+//        let mut ord = BigNum::new().unwrap();
+//        ctx.group.order(&mut ord, &mut ctx.bn_ctx).unwrap();
+//        let t = BigNum::from_slice(&[0x01]).unwrap();
+//        let secret_key = BigNum::from_slice(&k).unwrap();
+//
+//        let expected_k =
+//            hex::decode("c1aba586552242e6b324ab4b7b26f86239226f3cfa85b1c3b675cc061cf147dc")
+//                .unwrap();
+//        let data = hex::decode("02e2e1ab1b9f5a8a68fa4aad597e7493095648d3473b213bba120fe42d1a595f3e")
+//            .unwrap();
+//        let data_bn = BigNum::from_slice(&data).unwrap();
+//        let derived_k = nonce_generation_RFC6979(&secret_key, &data, &mut ctx).unwrap();
+//        println!("{:x?}", derived_k);
+//        assert_eq!(derived_k, expected_k.as_slice());
+//    }
 }
