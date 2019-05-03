@@ -141,35 +141,15 @@ fn nonce_generation_RFC6979(
     ctx: &mut ECContext,
 ) -> Result<[u8; 32], Error> {
 
-    // Step (a): omitted
-
-    // Steps (b, c): set V to ones and K to zeros
-    // where length = 8*ceil(hlen/8)
-    // If SHA256, length = 32
-    let V: [u8; 32] = [0x01; 32];
-    let K: [u8; 32] = [0x00; 32];
-
-
-    let c = 0..1;
-
-    /*   c.into_iter().map(|idx|{
-        let mut message = vec![];
-        message.extend(&V);
-        message.push(idx);
-        message.extend(secret_key.to_vec());
-        message.extend(data);
-
-        let k_prime = HMAC::mac(&message, &K);
-        let v_prime = HMAC::mac(&message, &k_prime);
-        V.clone_from_slice(&v_prime);
-        K.clone_from_slice(&k_prime);
-    });*/
-
-    // START
-
-    // Step d: Set K
-    // K = HMAC_K(V || 0x00 || int2octects(secret_key) || bits2octects(data))
-    let mut message1 = vec![];
+    // Bits to octets from data - bits2octets(h1)
+    // Length of this value should be dependent on qlen (i.e. SECP256k1 is 32)
+    let data_trunc = bits2octets(data, ctx)?;
+    let left_padding2 = match ctx.curve {
+        Curve::SECP256K1 => 32 - data_trunc.len(),
+        Curve::SECT163K1 => 21 - data_trunc.len(),
+    };
+    let mut padded_data_trunc: Vec<u8> = vec![0; left_padding2];
+    padded_data_trunc.extend(&data_trunc);
 
     // Bytes to octets from secret key - int2octects(x)
     // Left padding is required for inserting leading zeros
@@ -181,70 +161,38 @@ fn nonce_generation_RFC6979(
     let mut padded_secret_key_bytes: Vec<u8> = vec![0; left_padding];
     padded_secret_key_bytes.extend(&secret_key_bytes);
 
-    // Bits to octets from data - bits2octets(h1)
-    // Length of this value should be dependent on qlen (i.e. SECP256k1 is 32)
-    let data_trunc = bits2octets(data, ctx)?;
-    let left_padding2 = match ctx.curve {
-        Curve::SECP256K1 => 32 - data_trunc.len(),
-        Curve::SECT163K1 => 21 - data_trunc.len(),
-    };
-    let mut padded_data_trunc: Vec<u8> = vec![0; left_padding2];
-    padded_data_trunc.extend(&data_trunc);
+    // Init V & K
+    // K = HMAC_K(V || 0x00 || int2octects(secret_key) || bits2octects(data))
+    let mut V = [0x01; 32];
+    let mut K = [0x00; 32];
 
-//    println!("------> V length:  {:?} - {:x?}", &V.len(), &V);
-//    println!("------> internal bytes length:  {:?}  - {:x?}", &internal_bytes.len(), &internal_bytes);
-//    println!("------> padded secret key length:  {:?} - {:x?}", &padded_secret_key_bytes.len(), &padded_secret_key_bytes);
-    println!("------> data_trunc length:  {:?} - {:x?}", &data_trunc.len(), &data_trunc);
+    K = HMAC::mac([&V[..], &[0x00], &padded_secret_key_bytes[..], &padded_data_trunc[..]].concat().as_slice(), &K);
+    V = HMAC::mac(&V, &K);
 
-    message1.extend(&V);
-    message1.push(0x00);
-    message1.extend(&padded_secret_key_bytes);
-    message1.extend(&padded_data_trunc);
+    K = HMAC::mac([&V[..], &[0x01], &padded_secret_key_bytes[..], &padded_data_trunc[..]].concat().as_slice(), &K);
+    V = HMAC::mac(&V, &K);
 
-//    println!("------> message1 length {:?} - {:x?}", &message1.len(), &message1);
-
-    // Compute new value of K after first iteration
-    let k1 = HMAC::mac(&message1, &K);
-    let v1 = HMAC::mac(&V, &k1);
-    println!("------> K1 length {:?} - {:x?}", &k1.len(), &k1);
-    println!("------> V1 length {:?} - {:x?}", &v1.len(), &v1);
-
-    let mut message2 = vec![];
-    message2.extend(&v1);
-    message2.push(0x01);
-    message2.extend(&padded_secret_key_bytes);
-    message2.extend(&padded_data_trunc);
-//    println!("------> message2 length {:?} - {:x?}", &message2.len(), &message2);
-
-    let mut K = HMAC::mac(&message2, &k1);
-    let mut V = HMAC::mac(&v1, &K);
-    println!("------> K2 length {:?} - {:x?}", &K.len(), &K);
-    println!("------> V2 length {:?} - {:x?}", &V.len(), &V);
-
-//
-//    // if result is bigger than q, repeat
-//    let v3 = HMAC::mac(&v2, &k2);
-//
-//    println!("------> V3 length {:?} - {:x?}", &v3.len(), &v3);
-//
-//    let v4 = HMAC::mac(&v3, &k2);
-//    println!("------> V4 length {:?} - {:x?}", &v4.len(), &v4);
+//    let order = BigNum::new().map(|mut ord| {
+//        ctx.group.order(&mut ord, &mut ctx.bn_ctx);
+//        ord
+//    })?;
     let order = BigNum::new().map(|mut ord| {
         ctx.group.order(&mut ord, &mut ctx.bn_ctx);
         ord
     })?;
 
+//    Ok(HMAC::mac(&V, &K))
+
     loop {
         V = HMAC::mac(&V, &K);
-        let ret_bn = BigNum::from_slice(&V)?;
-        if &ret_bn > &BigNum::from_u32(0)? && &ret_bn < &order {
-            return Ok(V);
-        }
-        let mut message = vec![];
-        message.extend(&V);
-        message.push(0x00);
-        K = HMAC::mac(&message, &K);
-        V = HMAC::mac(&V, &K);
+        println!("---------> {:x?}", V.to_vec());
+        return Ok(V);
+//        let ret_bn = BigNum::from_slice(&V)?;
+//        if &ret_bn > &BigNum::from_u32(0)? && &ret_bn < &order {
+//            return Ok(V);
+//        }
+//        K = HMAC::mac([&V[..], &[0x00]].concat().as_slice(), &K);
+//        V = HMAC::mac(&V, &K);
     }
 
     //Err(Error::Unknown)
