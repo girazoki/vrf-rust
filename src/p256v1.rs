@@ -57,6 +57,8 @@ struct ECContext {
     group: EcGroup,
     bn_ctx: BigNumContext,
     hasher: MessageDigest,
+    qlen: usize,
+
 }
 
 /// A Elliptic Curve VRF using the curve p256v1
@@ -83,12 +85,17 @@ fn create_ec_context(curve: Curve) -> Result<ECContext, Error> {
     };
     let bn_ctx = BigNumContext::new()?;
     let hasher = MessageDigest::sha256();
+    let qlen =   match curve {
+        Curve::SECP256K1 => 256,
+        Curve::SECT163K1 => 163,
+    };
 
     Ok(ECContext {
         curve,
         group,
         bn_ctx,
         hasher,
+        qlen,
     })
 }
 
@@ -139,7 +146,7 @@ fn nonce_generation_RFC6979(
     secret_key: &BigNum,
     data: &[u8],
     ctx: &mut ECContext,
-) -> Result<[u8; 32], Error> {
+) -> Result<Vec<u8>, Error> {
 
     // Bits to octets from data - bits2octets(h1)
     // Length of this value should be dependent on qlen (i.e. SECP256k1 is 32)
@@ -182,14 +189,13 @@ fn nonce_generation_RFC6979(
     })?;
 
 //    Ok(HMAC::mac(&V, &K))
-
     loop {
         V = HMAC::mac(&V, &K);
-//        println!("---------> {:x?}", V.to_vec());
 //        return Ok(V);
-        let ret_bn = BigNum::from_slice(&V)?;
+        let ret_bn = bits2int(&V, ctx.qlen)?;
+
         if &ret_bn > &BigNum::from_u32(0)? && &ret_bn < &order {
-            return Ok(V);
+            return Ok(ret_bn.to_vec());
         }
         K = HMAC::mac([&V[..], &[0x00]].concat().as_slice(), &K);
         V = HMAC::mac(&V, &K);
@@ -235,10 +241,7 @@ fn nonce_generation_RFC6979(
 }
 
 fn bits2octets(data: &[u8], ctx: &mut ECContext) -> Result<Vec<u8>, Error> {
-    let mut z1 = match ctx.curve {
-        Curve::SECP256K1 => bits2int(data, 256)?,
-        Curve::SECT163K1 => bits2int(data, 163)?,
-    };
+    let mut z1 =  bits2int(data, ctx.qlen)?;
     let order = BigNum::new().map(|mut ord| {
         ctx.group.order(&mut ord, &mut ctx.bn_ctx);
         ord
@@ -377,7 +380,7 @@ mod test {
         // Expected result/nonce (labelled as K or T)
         // This is the va;ue of T
         let expected_nonce =
-            hex::decode("9305a46de7ff8eb107194debd3fd48aa20d5e7656cbe0ea69d2a8d4e7c67314a")
+            hex::decode("023AF4074C90A02B3FE61D286D5C87F425E6BDD81B")
                 .unwrap();
 
         // Secret Key (labelled as x)
@@ -391,7 +394,8 @@ mod test {
 
         // Nonce generation
         let derived_nonce = nonce_generation_RFC6979(&sk_bn, &data, &mut ctx).unwrap();
-        assert_eq!(derived_nonce, expected_nonce.as_slice());
+
+        assert_eq!(derived_nonce, expected_nonce);
 
         // let t = BigNum::from_slice(&[0x01]).unwrap();
         //        let mut c_k = BigNum::new().unwrap();
@@ -415,11 +419,13 @@ mod test {
     #[test]
     fn test_nonce_generation_RFC6979_SECP256K1() {
         let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
+        let mut ord = BigNum::new().unwrap();
+        ctx.group.order(&mut ord, &mut ctx.bn_ctx).unwrap();
 
         // Expected result/nonce (labelled as K or T)
         // This is the va;ue of T
         let expected_nonce =
-            hex::decode("c1aba586552242e6b324ab4b7b26f86239226f3cfa85b1c3b675cc061cf147dc")
+            hex::decode("A6E3C57DD01ABE90086538398355DD4C3B17AA873382B0F24D6129493D8AAD60")
                 .unwrap();
 
         // Secret Key (labelled as x)
@@ -428,13 +434,39 @@ mod test {
 
         // Hashed input message (labelled as h1)
         //FIXME: TO CHECK if 0x02 is correct
-        let data = hex::decode("02e2e1ab1b9f5a8a68fa4aad597e7493095648d3473b213bba120fe42d1a595f3e")
+        let data = hex::decode("AF2BDBE1AA9B6EC1E2ADE1D694F41FC71A831D0268E9891562113D8A62ADD1BF")
             .unwrap();
         let data_bn = BigNum::from_slice(&data).unwrap();
 
         // Nonce generation
         let derived_nonce = nonce_generation_RFC6979(&sk_bn, &data, &mut ctx).unwrap();
-        assert_eq!(derived_nonce, expected_nonce.as_slice());
+        assert_eq!(derived_nonce, expected_nonce);
+    }
+
+    #[test]
+    fn test_nonce_generation_RFC6979_SECP256K1_2() {
+        let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
+        let mut ord = BigNum::new().unwrap();
+        ctx.group.order(&mut ord, &mut ctx.bn_ctx).unwrap();
+        // Expected result/nonce (labelled as K or T)
+        // This is the va;ue of T
+        let expected_nonce =
+            hex::decode("D16B6AE827F17175E040871A1C7EC3500192C4C92677336EC2537ACAEE0008E0")
+                .unwrap();
+
+        // Secret Key (labelled as x)
+        let sk = hex::decode("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721").unwrap();
+        let sk_bn = BigNum::from_slice(&sk).unwrap();
+
+        // Hashed input message (labelled as h1)
+        //FIXME: TO CHECK if 0x02 is correct
+        let data = hex::decode("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")
+            .unwrap();
+        let data_bn = BigNum::from_slice(&data).unwrap();
+
+        // Nonce generation
+        let derived_nonce = nonce_generation_RFC6979(&sk_bn, &data, &mut ctx).unwrap();
+        assert_eq!(derived_nonce, expected_nonce);
     }
 
     //    #[test]
