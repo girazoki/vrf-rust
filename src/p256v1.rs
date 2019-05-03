@@ -185,14 +185,14 @@ fn nonce_generation_RFC6979(
 
     loop {
         V = HMAC::mac(&V, &K);
-        println!("---------> {:x?}", V.to_vec());
-        return Ok(V);
-//        let ret_bn = BigNum::from_slice(&V)?;
-//        if &ret_bn > &BigNum::from_u32(0)? && &ret_bn < &order {
-//            return Ok(V);
-//        }
-//        K = HMAC::mac([&V[..], &[0x00]].concat().as_slice(), &K);
-//        V = HMAC::mac(&V, &K);
+//        println!("---------> {:x?}", V.to_vec());
+//        return Ok(V);
+        let ret_bn = BigNum::from_slice(&V)?;
+        if &ret_bn > &BigNum::from_u32(0)? && &ret_bn < &order {
+            return Ok(V);
+        }
+        K = HMAC::mac([&V[..], &[0x00]].concat().as_slice(), &K);
+        V = HMAC::mac(&V, &K);
     }
 
     //Err(Error::Unknown)
