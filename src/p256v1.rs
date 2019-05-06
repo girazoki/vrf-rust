@@ -151,6 +151,7 @@ fn nonce_generation_RFC6979(
     // Bits to octets from data - bits2octets(h1)
     // Length of this value should be dependent on qlen (i.e. SECP256k1 is 32)
     let data_trunc = bits2octets(data, ctx)?;
+    println!("k2{:x?}", data_trunc);
     let left_padding2 = match ctx.curve {
         Curve::SECP256K1 => 32 - data_trunc.len(),
         Curve::SECT163K1 => 21 - data_trunc.len(),
@@ -241,7 +242,13 @@ fn nonce_generation_RFC6979(
 }
 
 fn bits2octets(data: &[u8], ctx: &mut ECContext) -> Result<Vec<u8>, Error> {
-    let mut z1 =  bits2int(data, ctx.qlen)?;
+    //FIXME: TO DECIDE WHETHER FOLLOW DIFFERENT TEST VECTORS (qlen for both cases)
+    let mut z1 = match  ctx.curve {
+        Curve::SECP256K1 => bits2int(data, data.len()*8)?,
+        Curve::SECT163K1 => bits2int(data, ctx.qlen)?,
+    };
+    //let mut z1 =  bits2int(data, data.len()*8)?;
+//    let mut z1 =  bits2int(data, data.len()*8)?;
     let order = BigNum::new().map(|mut ord| {
         ctx.group.order(&mut ord, &mut ctx.bn_ctx);
         ord
@@ -466,6 +473,33 @@ mod test {
 
         // Nonce generation
         let derived_nonce = nonce_generation_RFC6979(&sk_bn, &data, &mut ctx).unwrap();
+        assert_eq!(derived_nonce, expected_nonce);
+    }
+    #[test]
+    fn test_nonce_generation_RFC6979_SECP256K1_3() {
+        let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
+        let mut ord = BigNum::new().unwrap();
+        ctx.group.order(&mut ord, &mut ctx.bn_ctx).unwrap();
+        // Expected result/nonce (labelled as K or T)
+        // This is the va;ue of T
+        let expected_nonce =
+            hex::decode("c1aba586552242e6b324ab4b7b26f86239226f3cfa85b1c3b675cc061cf147dc")
+                .unwrap();
+
+        // Secret Key (labelled as x)
+        let sk = hex::decode("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721").unwrap();
+        let sk_bn = BigNum::from_slice(&sk).unwrap();
+
+        // Hashed input message (labelled as h1)
+        //FIXME: TO CHECK if 0x02 is correct
+        let data = hex::decode("02e2e1ab1b9f5a8a68fa4aad597e7493095648d3473b213bba120fe42d1a595f3e")
+            .unwrap();
+        let data_bn = BigNum::from_slice(&data).unwrap();
+
+        // Nonce generation
+        let derived_nonce = nonce_generation_RFC6979(&sk_bn, &data, &mut ctx).unwrap();
+        println!("{:x?}", derived_nonce);
+
         assert_eq!(derived_nonce, expected_nonce);
     }
 
