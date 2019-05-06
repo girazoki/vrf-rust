@@ -56,7 +56,9 @@ struct ECContext {
     curve: Curve,
     group: EcGroup,
     bn_ctx: BigNumContext,
+    order: BigNum,
     hasher: MessageDigest,
+    n: usize,
     qlen: usize,
 
 }
@@ -83,18 +85,31 @@ fn create_ec_context(curve: Curve) -> Result<ECContext, Error> {
         Curve::SECP256K1 => EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?,
         Curve::SECT163K1 => EcGroup::from_curve_name(Nid::SECT163K1)?,
     };
-    let bn_ctx = BigNumContext::new()?;
+    let mut bn_ctx = BigNumContext::new()?;
     let hasher = MessageDigest::sha256();
-    let qlen =   match curve {
-        Curve::SECP256K1 => 256,
-        Curve::SECT163K1 => 163,
-    };
+    let order = BigNum::new().map(|mut ord| {
+        group.order(&mut ord, &mut bn_ctx);
+        ord
+    })?;
+
+    let n = BigNum::new().and_then(|mut a| {
+        BigNum::new().and_then(|mut b| {
+            BigNum::new().and_then(|mut p| {
+                group.components_gfp(&mut a, &mut b, &mut p, &mut bn_ctx);
+                Ok(((p.num_bits() + (p.num_bits()% 2)) / 2) as usize)
+            })
+        })
+    })?;
+
+    let qlen =  order.num_bits() as usize;
 
     Ok(ECContext {
         curve,
         group,
         bn_ctx,
+        order,
         hasher,
+        n,
         qlen,
     })
 }
@@ -151,7 +166,6 @@ fn nonce_generation_RFC6979(
     // Bits to octets from data - bits2octets(h1)
     // Length of this value should be dependent on qlen (i.e. SECP256k1 is 32)
     let data_trunc = bits2octets(data, ctx)?;
-    println!("k2{:x?}", data_trunc);
     let left_padding2 = match ctx.curve {
         Curve::SECP256K1 => 32 - data_trunc.len(),
         Curve::SECT163K1 => 21 - data_trunc.len(),
@@ -184,10 +198,6 @@ fn nonce_generation_RFC6979(
 //        ctx.group.order(&mut ord, &mut ctx.bn_ctx);
 //        ord
 //    })?;
-    let order = BigNum::new().map(|mut ord| {
-        ctx.group.order(&mut ord, &mut ctx.bn_ctx);
-        ord
-    })?;
 
 //    Ok(HMAC::mac(&V, &K))
     loop {
@@ -195,7 +205,7 @@ fn nonce_generation_RFC6979(
 //        return Ok(V);
         let ret_bn = bits2int(&V, ctx.qlen)?;
 
-        if &ret_bn > &BigNum::from_u32(0)? && &ret_bn < &order {
+        if &ret_bn > &BigNum::from_u32(0)? && &ret_bn < &ctx.order {
             return Ok(ret_bn.to_vec());
         }
         K = HMAC::mac([&V[..], &[0x00]].concat().as_slice(), &K);
@@ -249,10 +259,7 @@ fn bits2octets(data: &[u8], ctx: &mut ECContext) -> Result<Vec<u8>, Error> {
     };
     //let mut z1 =  bits2int(data, data.len()*8)?;
 //    let mut z1 =  bits2int(data, data.len()*8)?;
-    let order = BigNum::new().map(|mut ord| {
-        ctx.group.order(&mut ord, &mut ctx.bn_ctx);
-        ord
-    })?;
+
 //    let z2 = &z1 - &order;
 //
 //    let bn_zero = BigNum::from_u32(0)?;
@@ -265,7 +272,7 @@ fn bits2octets(data: &[u8], ctx: &mut ECContext) -> Result<Vec<u8>, Error> {
 //    //    let mut data_bn = bits2int(data, 256)?;
 //
     let result = BigNum::new().map(|mut res| {
-        res.nnmod(&z1, &order, &mut ctx.bn_ctx);
+        res.nnmod(&z1, &ctx.order, &mut ctx.bn_ctx);
         res.to_vec()
     })?;
 
@@ -383,6 +390,8 @@ mod test {
     #[test]
     fn test_nonce_generation_RFC6979_SECT163K1() {
         let mut ctx = create_ec_context(Curve::SECT163K1).unwrap();
+        let mut ord = BigNum::new().unwrap();
+        ctx.group.order(&mut ord, &mut ctx.bn_ctx).unwrap();
 
         // Expected result/nonce (labelled as K or T)
         // This is the va;ue of T
@@ -427,7 +436,11 @@ mod test {
     fn test_nonce_generation_RFC6979_SECP256K1() {
         let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
         let mut ord = BigNum::new().unwrap();
-        ctx.group.order(&mut ord, &mut ctx.bn_ctx).unwrap();
+        let mut a = BigNum::new().unwrap();
+        let mut b = BigNum::new().unwrap();
+        let mut p = BigNum::new().unwrap();
+        ctx.group.components_gfp(&mut a, &mut b, &mut p, &mut ctx.bn_ctx).unwrap();
+
 
         // Expected result/nonce (labelled as K or T)
         // This is the va;ue of T
@@ -498,7 +511,6 @@ mod test {
 
         // Nonce generation
         let derived_nonce = nonce_generation_RFC6979(&sk_bn, &data, &mut ctx).unwrap();
-        println!("{:x?}", derived_nonce);
 
         assert_eq!(derived_nonce, expected_nonce);
     }
