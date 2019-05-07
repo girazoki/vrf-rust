@@ -27,7 +27,7 @@ pub type SecretKey<'a> = &'a [u8; SECRET_KEY_SIZE];
 pub type PublicKey<'a> = &'a [u8; PUBLIC_KEY_SIZE];
 
 enum Curve {
-    SECP256K1,
+    NISTP256,
     SECT163K1,
 }
 
@@ -82,7 +82,7 @@ impl<'a> VRF<PublicKey<'a>, SecretKey<'a>> for P256v1 {
 /// Function to create a Elliptic Curve context using the curve prime256v1
 fn create_ec_context(curve: Curve) -> Result<ECContext, Error> {
     let group = match curve {
-        Curve::SECP256K1 => EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?,
+        Curve::NISTP256 => EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?,
         Curve::SECT163K1 => EcGroup::from_curve_name(Nid::SECT163K1)?,
     };
     let mut bn_ctx = BigNumContext::new()?;
@@ -167,7 +167,7 @@ fn nonce_generation_RFC6979(
     // Length of this value should be dependent on qlen (i.e. SECP256k1 is 32)
     let data_trunc = bits2octets(data, ctx)?;
     let left_padding2 = match ctx.curve {
-        Curve::SECP256K1 => 32 - data_trunc.len(),
+        Curve::NISTP256 => 32 - data_trunc.len(),
         Curve::SECT163K1 => 21 - data_trunc.len(),
     };
     let mut padded_data_trunc: Vec<u8> = vec![0; left_padding2];
@@ -177,7 +177,7 @@ fn nonce_generation_RFC6979(
     // Left padding is required for inserting leading zeros
     let mut secret_key_bytes: Vec<u8> = secret_key.to_vec();
     let left_padding = match ctx.curve {
-        Curve::SECP256K1 => 32 - secret_key_bytes.len(),
+        Curve::NISTP256 => 32 - secret_key_bytes.len(),
         Curve::SECT163K1 => 21 - secret_key_bytes.len(),
     };
     let mut padded_secret_key_bytes: Vec<u8> = vec![0; left_padding];
@@ -254,7 +254,7 @@ fn nonce_generation_RFC6979(
 fn bits2octets(data: &[u8], ctx: &mut ECContext) -> Result<Vec<u8>, Error> {
     //FIXME: TO DECIDE WHETHER FOLLOW DIFFERENT TEST VECTORS (qlen for both cases)
     let mut z1 = match  ctx.curve {
-        Curve::SECP256K1 => bits2int(data, data.len()*8)?,
+        Curve::NISTP256 => bits2int(data, data.len()*8)?,
         Curve::SECT163K1 => bits2int(data, ctx.qlen)?,
     };
     //let mut z1 =  bits2int(data, data.len()*8)?;
@@ -325,7 +325,7 @@ mod test {
         // Example of using a different hashing function
 
         let k = [0x01];
-        let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
+        let mut ctx = create_ec_context(Curve::NISTP256).unwrap();
 
         let secret_key = BigNum::from_slice(&k).unwrap();
         let expected = [
@@ -346,7 +346,7 @@ mod test {
     fn test_hash_to_try_and_increment() {
         // Example of using a different hashing function
         let suite: u8 = 1;
-        let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
+        let mut ctx = create_ec_context(Curve::NISTP256).unwrap();
         let public_key_hex =
             hex::decode("0360fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6")
                 .unwrap();
@@ -368,7 +368,7 @@ mod test {
     fn test_hash_to_try_and_increment_2() {
         // Example of using a different hashing function
         let suite: u8 = 1;
-        let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
+        let mut ctx = create_ec_context(Curve::NISTP256).unwrap();
         let public_key_hex =
             hex::decode("03596375e6ce57e0f20294fc46bdfcfd19a39f8161b58695b3ec5b3d16427c274d")
                 .unwrap();
@@ -433,8 +433,8 @@ mod test {
     }
 
     #[test]
-    fn test_nonce_generation_RFC6979_SECP256K1() {
-        let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
+    fn test_nonce_generation_RFC6979_NIISTP256() {
+        let mut ctx = create_ec_context(Curve::NISTP256).unwrap();
         let mut ord = BigNum::new().unwrap();
         let mut a = BigNum::new().unwrap();
         let mut b = BigNum::new().unwrap();
@@ -464,8 +464,8 @@ mod test {
     }
 
     #[test]
-    fn test_nonce_generation_RFC6979_SECP256K1_2() {
-        let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
+    fn test_nonce_generation_RFC6979_NISTP256_2() {
+        let mut ctx = create_ec_context(Curve::NISTP256).unwrap();
         let mut ord = BigNum::new().unwrap();
         ctx.group.order(&mut ord, &mut ctx.bn_ctx).unwrap();
         // Expected result/nonce (labelled as K or T)
@@ -489,8 +489,8 @@ mod test {
         assert_eq!(derived_nonce, expected_nonce);
     }
     #[test]
-    fn test_nonce_generation_RFC6979_SECP256K1_3() {
-        let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
+    fn test_nonce_generation_RFC6979_NISTP256_3() {
+        let mut ctx = create_ec_context(Curve::NISTP256).unwrap();
         let mut ord = BigNum::new().unwrap();
         ctx.group.order(&mut ord, &mut ctx.bn_ctx).unwrap();
         // Expected result/nonce (labelled as K or T)
@@ -539,7 +539,7 @@ mod test {
 
     #[test]
     fn test_bits2int() {
-        let mut ctx = create_ec_context(Curve::SECP256K1).unwrap();
+        let mut ctx = create_ec_context(Curve::NISTP256).unwrap();
         let data1 = vec![0x01; 32];
         let data1_bn = BigNum::from_slice(&data1).unwrap();
         let result1 = bits2int(&data1, 256).unwrap();
